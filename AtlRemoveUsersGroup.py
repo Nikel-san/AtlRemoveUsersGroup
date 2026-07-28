@@ -29,6 +29,23 @@ import requests
 LOG = logging.getLogger(__name__)
 
 
+def _extract_list(data, *keys):
+	if isinstance(data, list):
+		return data
+	if not isinstance(data, dict):
+		return []
+	for key in keys:
+		value = data.get(key)
+		if isinstance(value, list):
+			return value
+		if isinstance(value, dict):
+			for nested_key in ("users", "values"):
+				nested_value = value.get(nested_key)
+				if isinstance(nested_value, list):
+					return nested_value
+	return []
+
+
 def get_jira_auth() -> Optional[tuple]:
 	email = os.getenv("JIRA_EMAIL")
 	token = os.getenv("JIRA_PAT")
@@ -51,13 +68,7 @@ def fetch_group_members(site: str, group: str, auth: tuple) -> List[dict]:
 		resp = requests.get(base, params=params, auth=auth)
 		resp.raise_for_status()
 		data = resp.json()
-		page_members = data.get("values") or data.get("members") or data.get("users") or data.get("results") or data.get("values")
-		if page_members is None:
-			# Some responses put members at top-level list
-			if isinstance(data, list):
-				page_members = data
-			else:
-				page_members = []
+		page_members = _extract_list(data, "values", "members", "users", "results")
 		members.extend(page_members)
 		# determine pagination
 		total = data.get("total")
@@ -83,13 +94,7 @@ def fetch_org_user_status_map(org_id: str, token: str) -> Dict[str, str]:
 		resp.raise_for_status()
 		data = resp.json()
 		# data may contain 'values' or 'users' or be a list
-		items = data.get("values") or data.get("users") or data.get("items") or data.get("results") or data
-		if isinstance(items, dict):
-			# some shapes wrap list inside a key
-			items = items.get("users") or items.get("values") or []
-		if not isinstance(items, list):
-			# as a last resort, if top-level has 'users' key
-			items = data.get("users") or []
+		items = _extract_list(data, "values", "users", "items", "results")
 
 		for u in items:
 			# account_id vs accountId
