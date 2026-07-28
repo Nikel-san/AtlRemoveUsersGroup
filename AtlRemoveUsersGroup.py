@@ -124,7 +124,7 @@ def write_csv(path: Path, rows: Iterable[Dict[str, str]]) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
 	p = argparse.ArgumentParser(description="Remove non-active users from Atlassian Cloud group (dry-run default)")
-	p.add_argument("-s", "--site", required=True, help="Atlassian site (e.g., iderawebdev.atlassian.net)")
+	p.add_argument("-s", "--site", required=True, help="Atlassian site (e.g., yoursite.atlassian.net)")
 	p.add_argument("-g", "--group", required=True, help="Group name to clean")
 	p.add_argument("--execute", action="store_true", help="Actually remove users (default: dry-run)")
 	p.add_argument("--output", default="removals.csv", help="CSV file to write results")
