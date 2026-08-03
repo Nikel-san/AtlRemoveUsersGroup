@@ -20,6 +20,7 @@ import argparse
 import csv
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
@@ -30,6 +31,23 @@ from urllib3.util.retry import Retry
 
 
 LOG = logging.getLogger(__name__)
+
+ANSI_RESET = "\033[0m"
+ANSI_RED = "\033[31m"
+ANSI_YELLOW = "\033[33m"
+ANSI_GREEN = "\033[32m"
+
+
+def warn(message: str) -> None:
+	print(f"{ANSI_YELLOW}WARN{ANSI_RESET}: {message}")
+
+
+def success(message: str) -> None:
+	print(f"{ANSI_GREEN}SUCCESS{ANSI_RESET}: {message}")
+
+
+def error(message: str) -> None:
+	print(f"{ANSI_RED}ERROR{ANSI_RESET}: {message}")
 
 
 def normalize_site(site: str) -> str:
@@ -177,13 +195,13 @@ def write_csv(path: Path, rows: Iterable[Dict[str, str]]) -> None:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-	p = argparse.ArgumentParser(description="Remove non-active users from Atlassian Cloud group (dry-run default)")
-	p.add_argument("-s", "--site", required=True, help="Atlassian site (e.g., yoursite.atlassian.net)")
+	p = argparse.ArgumentParser(description="Remove non-active users from Atlassian Cloud group")
+	p.add_argument("-s", "--site", default=os.getenv("ATLASSIAN_SITE"), help="Atlassian site (env: ATLASSIAN_SITE)")
 	p.add_argument("-g", "--group", required=True, help="Group name to clean")
 	mode_group = p.add_mutually_exclusive_group()
+	mode_group.add_argument("--dry-run", action="store_true", help="Preview removals without executing them")
 	mode_group.add_argument("--execute", action="store_true", help="Actually remove users")
-	mode_group.add_argument("--dry-run", action="store_true", help="Do not remove users; only report planned actions")
-	p.add_argument("--output", default="removals.csv", help="CSV file to write results")
+	p.add_argument("--out", default="atl_group_cleanup.csv", help="CSV file to write results")
 	return p
 
 
@@ -200,9 +218,27 @@ def get_next_link(resp: requests.Response, data: Any) -> Optional[str]:
 	return None
 
 
+def get_available_filename(output_dir: Path, filename: str) -> Path:
+	path = output_dir / filename
+	if not path.exists():
+		return path
+
+	stem = path.stem
+	suffix = path.suffix
+	index = 1
+	while True:
+		candidate = output_dir / f"{stem}_{index}{suffix}"
+		if not candidate.exists():
+			return candidate
+		index += 1
+
+
 def main(argv: List[str] | None = None) -> int:
 	parser = build_arg_parser()
 	args = parser.parse_args(argv)
+
+	if not args.site:
+		parser.error("--site is required when ATLASSIAN_SITE env var is not set")
 
 	dry_run = args.dry_run or not args.execute
 
@@ -259,9 +295,18 @@ def main(argv: List[str] | None = None) -> int:
 			row["error"] = ""
 		results.append(row)
 
-	out_path = Path(args.output)
+	out_path = Path(args.out)
+	if not out_path.is_absolute():
+		out_path = Path.cwd() / out_path
+	out_path = get_available_filename(out_path.parent, out_path.name)
 	write_csv(out_path, results)
-	LOG.info("Wrote results to %s", out_path)
+	if dry_run:
+		warn(f"Dry run complete; {len(results)} members reviewed. CSV written to {out_path}")
+	else:
+		success(f"Cleanup complete; CSV written to {out_path}")
+	print(f"Processed: {len(results)}")
+	print(f"Removed: {sum(1 for row in results if row.get('action') == 'removed')}")
+	print(f"Skipped: {sum(1 for row in results if row.get('action') == 'skip')}")
 	return 0
 
 

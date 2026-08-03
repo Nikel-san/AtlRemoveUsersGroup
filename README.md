@@ -25,20 +25,21 @@ The script requires the following environment variables:
 python AtlRemoveUsersGroup.py --site <your-site>.atlassian.net --group "Group Name"
 ```
 
-Dry-run mode is the default. It writes a CSV report of group members and planned actions.
+Live execution is the default. Use `--dry-run` to preview removals without changing the group.
 
-To actually remove users from the group, add `--execute`:
+To preview planned removals without executing them, add `--dry-run`:
 
 ```powershell
-python AtlRemoveUsersGroup.py --site <your-site>.atlassian.net --group "Group Name" --execute
+python AtlRemoveUsersGroup.py --site <your-site>.atlassian.net --group "Group Name" --dry-run
 ```
 
 ## Options
 
-- `-s`, `--site` : Atlassian site hostname, for example `example.atlassian.net`
+- `-s`, `--site` : Atlassian site hostname, for example `example.atlassian.net` (env: `ATLASSIAN_SITE`)
 - `-g`, `--group` : Group name to clean
-- `--execute` : Actually remove non-active users from the group (default is dry-run)
-- `--output` : CSV file to write results (default: `removals.csv`)
+- `--dry-run` : Preview removals without executing them (default is live execution)
+- `--execute` : Actually remove non-active users from the group
+- `--out` : CSV file to write results (default: `atl_group_cleanup.csv`)
 
 ## Output
 
