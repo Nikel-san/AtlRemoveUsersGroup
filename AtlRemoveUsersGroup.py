@@ -5,7 +5,7 @@ AtlRemoveUsersGroup.py
 
 Implements Atlassian Cloud group cleanup per ICC-1: list group members,
 lookup org account statuses, and remove non-active users from a specified
-group. Defaults to dry-run; use `--execute` to perform deletions.
+group. Use `--dry-run` to preview deletions without performing them.
 
 Environment variables (required):
 - ATLASSIAN_TOKEN: Bearer token for Admin API
@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import logging
 import os
 import sys
 from pathlib import Path
@@ -30,8 +29,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-LOG = logging.getLogger(__name__)
-
 ANSI_RESET = "\033[0m"
 ANSI_RED = "\033[31m"
 ANSI_YELLOW = "\033[33m"
@@ -39,7 +36,7 @@ ANSI_GREEN = "\033[32m"
 
 
 def warn(message: str) -> None:
-	print(f"{ANSI_YELLOW}WARN{ANSI_RESET}: {message}")
+	print(f"{ANSI_YELLOW}WARN{ANSI_RESET}: {message}", file=sys.stderr)
 
 
 def success(message: str) -> None:
@@ -47,7 +44,7 @@ def success(message: str) -> None:
 
 
 def error(message: str) -> None:
-	print(f"{ANSI_RED}ERROR{ANSI_RESET}: {message}")
+	print(f"{ANSI_RED}ERROR{ANSI_RESET}: {message}", file=sys.stderr)
 
 
 def normalize_site(site: str) -> str:
@@ -55,8 +52,9 @@ def normalize_site(site: str) -> str:
 	if clean_site.startswith("http://") or clean_site.startswith("https://"):
 		parsed = urlparse(clean_site)
 		clean_site = parsed.netloc
-	if clean_site.endswith("/"):
-		clean_site = clean_site[:-1]
+	clean_site = clean_site.rstrip("/")
+	if "." not in clean_site:
+		clean_site = f"{clean_site}.atlassian.net"
 	return clean_site
 
 
@@ -185,8 +183,8 @@ def remove_user_from_group(session: requests.Session, site: str, group: str, acc
 	return resp.status_code in (200, 204)
 
 
-def write_csv(path: Path, rows: Iterable[Dict[str, str]]) -> None:
-	fieldnames = ["accountId", "displayName", "email", "account_status", "action", "error"]
+def write_results_csv(path: Path, rows: Iterable[Dict[str, str]]) -> None:
+	fieldnames = ["email", "name", "account_id", "account_status", "action"]
 	with path.open("w", newline="", encoding="utf-8") as fh:
 		writer = csv.DictWriter(fh, fieldnames=fieldnames)
 		writer.writeheader()
@@ -196,11 +194,15 @@ def write_csv(path: Path, rows: Iterable[Dict[str, str]]) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
 	p = argparse.ArgumentParser(description="Remove non-active users from Atlassian Cloud group")
-	p.add_argument("-s", "--site", default=os.getenv("ATLASSIAN_SITE"), help="Atlassian site (env: ATLASSIAN_SITE)")
+	p.add_argument(
+		"-s",
+		"--site",
+		default=os.getenv("ATLASSIAN_SITE"),
+		help="Atlassian site, e.g. yoursite.atlassian.net (default: ATLASSIAN_SITE env var)",
+	)
 	p.add_argument("-g", "--group", required=True, help="Group name to clean")
-	mode_group = p.add_mutually_exclusive_group()
-	mode_group.add_argument("--dry-run", action="store_true", help="Preview removals without executing them")
-	mode_group.add_argument("--execute", action="store_true", help="Actually remove users")
+	p.add_argument("-o", "--org", default=os.getenv("ATLASSIAN_ORG"), help="Organization ID (default: ATLASSIAN_ORG env var)")
+	p.add_argument("--dry-run", action="store_true", help="Preview removals without executing them")
 	p.add_argument("--out", default="atl_group_cleanup.csv", help="CSV file to write results")
 	return p
 
@@ -240,73 +242,89 @@ def main(argv: List[str] | None = None) -> int:
 	if not args.site:
 		parser.error("--site is required when ATLASSIAN_SITE env var is not set")
 
-	dry_run = args.dry_run or not args.execute
-
-	logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+	dry_run = args.dry_run
 
 	jira_auth = get_jira_auth()
 	if not jira_auth:
-		LOG.error("Missing JIRA_EMAIL or JIRA_PAT environment variables")
+		error("Missing JIRA_EMAIL or JIRA_PAT environment variables")
 		return 2
 
 	admin_token = get_admin_token()
-	org_id = os.getenv("ATLASSIAN_ORG")
+	org_id = args.org
 	if not admin_token or not org_id:
-		LOG.error("Missing ATLASSIAN_TOKEN or ATLASSIAN_ORG environment variables")
+		error("Missing ATLASSIAN_TOKEN or --org/ATLASSIAN_ORG")
 		return 2
 
 	site = normalize_site(args.site)
 	request_session = create_request_session()
 
-	LOG.info("Fetching members of group '%s' on site %s", args.group, site)
+	warn(f"Fetching members of group '{args.group}' on site {site}")
 	try:
 		members = fetch_group_members(request_session, site, args.group, jira_auth)
 	except Exception as exc:
-		LOG.exception("Failed to fetch group members: %s", exc)
+		error(f"Failed to fetch group members: {exc}")
 		return 3
 
-	LOG.info("Fetching org user statuses for org %s", org_id)
+	warn(f"Fetching org user statuses for org {org_id}")
 	try:
 		status_map = fetch_org_user_status_map(request_session, org_id, admin_token)
 	except Exception as exc:
-		LOG.exception("Failed to fetch org users: %s", exc)
+		error(f"Failed to fetch org users: {exc}")
 		return 4
 
 	results: List[Dict[str, str]] = []
+	active_kept = 0
+	non_active = 0
+	failed = 0
 	for m in members:
 		account_id = m.get("accountId") or m.get("account_id")
 		display = m.get("displayName") or m.get("name") or ""
 		email = m.get("emailAddress") or m.get("email") or ""
-		acct_status = status_map.get(str(account_id), "unknown") if account_id else "unknown"
-
-		row = {"accountId": account_id or "", "displayName": display, "email": email, "account_status": acct_status}
-		if acct_status and acct_status.lower() != "active":
-			row["action"] = "will-remove" if dry_run else "removed"
-			row["error"] = ""
-			if not dry_run and account_id:
-				try:
-					ok = remove_user_from_group(request_session, site, args.group, account_id, jira_auth)
-					if not ok:
-						row["error"] = "remove-failed"
-				except Exception as exc:
-					row["error"] = str(exc)
+		acct_status = status_map.get(str(account_id)) if account_id else None
+		row = {
+			"email": email,
+			"name": display,
+			"account_id": account_id or "",
+			"account_status": acct_status or "",
+			"action": "",
+		}
+		if not acct_status:
+			warn(f"Skipping unmanaged or external user {display or account_id}")
+			row["action"] = "skipped-unmanaged"
+		elif acct_status.lower() == "active":
+			active_kept += 1
+			row["action"] = "kept"
 		else:
-			row["action"] = "skip"
-			row["error"] = ""
+			non_active += 1
+			if dry_run:
+				warn(f"[DRY-RUN] Would remove {display or account_id} from {args.group}")
+				row["action"] = "would-remove"
+			else:
+				try:
+					if remove_user_from_group(request_session, site, args.group, account_id, jira_auth):
+						row["action"] = "removed"
+						success(f"Removed {display or account_id} from {args.group}")
+					else:
+						row["action"] = "failed"
+						failed += 1
+						error(f"Failed to remove {display or account_id} from {args.group}")
+				except Exception as exc:
+					row["action"] = "failed"
+					failed += 1
+					error(f"Failed to remove {display or account_id} from {args.group}: {exc}")
 		results.append(row)
 
 	out_path = Path(args.out)
 	if not out_path.is_absolute():
 		out_path = Path.cwd() / out_path
 	out_path = get_available_filename(out_path.parent, out_path.name)
-	write_csv(out_path, results)
-	if dry_run:
-		warn(f"Dry run complete; {len(results)} members reviewed. CSV written to {out_path}")
-	else:
-		success(f"Cleanup complete; CSV written to {out_path}")
-	print(f"Processed: {len(results)}")
-	print(f"Removed: {sum(1 for row in results if row.get('action') == 'removed')}")
-	print(f"Skipped: {sum(1 for row in results if row.get('action') == 'skip')}")
+	write_results_csv(out_path, results)
+	success(f"Results written to {out_path}")
+	print("Summary:")
+	print(f"  Group members total: {len(members)}")
+	print(f"  Active (kept): {active_kept}")
+	print(f"  Non-active ({'would remove' if dry_run else 'removed'}): {non_active - failed}")
+	print(f"  Failed: {failed}")
 	return 0
 
 
