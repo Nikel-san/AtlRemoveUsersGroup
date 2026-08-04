@@ -7,11 +7,10 @@ Implements Atlassian Cloud group cleanup per ICC-1: list group members,
 lookup org account statuses, and remove non-active users from a specified
 group. Use `--dry-run` to preview deletions without performing them.
 
-Environment variables (required):
-- ATLASSIAN_TOKEN: Bearer token for Admin API
-- ATLASSIAN_ORG: Organization ID for Admin API
+Environment variables:
 - JIRA_EMAIL: Service account email for Jira REST API (Basic auth)
 - JIRA_PAT: API token for Jira REST API (Basic auth)
+- ATLASSIAN_TOKEN / ATLASSIAN_ORG: optional legacy values; no longer required for the removal decision
 """
 
 from __future__ import annotations
@@ -116,6 +115,15 @@ def get_jira_auth() -> Optional[tuple]:
 
 def get_admin_token() -> Optional[str]:
 	return os.getenv("ATLASSIAN_TOKEN")
+
+
+def is_member_active(member: dict) -> bool:
+	active_value = member.get("active", True)
+	if isinstance(active_value, bool):
+		return active_value
+	if isinstance(active_value, str):
+		return active_value.strip().lower() in {"true", "1", "yes", "y"}
+	return bool(active_value)
 
 
 def fetch_group_members(session: requests.Session, site: str, group: str, auth: tuple) -> List[dict]:
@@ -269,12 +277,6 @@ def main(argv: List[str] | None = None) -> int:
 		error("Missing JIRA_EMAIL or JIRA_PAT environment variables")
 		return 2
 
-	admin_token = get_admin_token()
-	org_id = args.org
-	if not admin_token or not org_id:
-		error("Missing ATLASSIAN_TOKEN or --org/ATLASSIAN_ORG")
-		return 2
-
 	request_session = create_request_session()
 
 	warn(f"Fetching members of group '{args.group}' on site {site}")
@@ -284,13 +286,6 @@ def main(argv: List[str] | None = None) -> int:
 		error(f"Failed to fetch group members: {exc}")
 		return 3
 
-	warn(f"Fetching org user statuses for org {org_id}")
-	try:
-		status_map = fetch_org_user_status_map(request_session, org_id, admin_token)
-	except Exception as exc:
-		error(f"Failed to fetch org users: {exc}")
-		return 4
-
 	results: List[Dict[str, str]] = []
 	active_kept = 0
 	non_active = 0
@@ -299,18 +294,15 @@ def main(argv: List[str] | None = None) -> int:
 		account_id = m.get("accountId") or m.get("account_id")
 		display = m.get("displayName") or m.get("name") or ""
 		email = m.get("emailAddress") or m.get("email") or ""
-		acct_status = status_map.get(str(account_id)) if account_id else None
+		is_active = is_member_active(m)
 		row = {
 			"email": email,
 			"name": display,
 			"account_id": account_id or "",
-			"account_status": acct_status or "",
+			"account_status": "active" if is_active else "inactive",
 			"action": "",
 		}
-		if not acct_status:
-			warn(f"Skipping unmanaged or external user {display or account_id}")
-			row["action"] = "skipped-unmanaged"
-		elif acct_status.lower() == "active":
+		if is_active:
 			active_kept += 1
 			row["action"] = "kept"
 		else:
