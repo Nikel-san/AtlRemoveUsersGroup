@@ -64,6 +64,10 @@ def normalize_site(site: str) -> str:
 	return clean_site
 
 
+def build_base_url(site: str) -> str:
+	return f"https://{normalize_site(site)}"
+
+
 def create_request_session() -> requests.Session:
 	session = requests.Session()
 	retry = Retry(
@@ -116,7 +120,7 @@ def get_admin_token() -> Optional[str]:
 
 def fetch_group_members(session: requests.Session, site: str, group: str, auth: tuple) -> List[dict]:
 	members: List[dict] = []
-	url = f"https://{site}/rest/api/3/group/member"
+	url = f"{build_base_url(site)}/rest/api/3/group/member"
 	start_at = 0
 	max_results = 50
 	params = {"groupname": group, "startAt": start_at, "maxResults": max_results}
@@ -183,7 +187,7 @@ def fetch_org_user_status_map(session: requests.Session, org_id: str, token: str
 
 
 def remove_user_from_group(session: requests.Session, site: str, group: str, account_id: str, auth: tuple) -> bool:
-	url = f"https://{site}/rest/api/3/group/user"
+	url = f"{build_base_url(site)}/rest/api/3/group/user"
 	params = {"groupname": group, "accountId": account_id}
 	resp = request_with_retries(session, "DELETE", url, params=params, auth=auth)
 	return resp.status_code in (200, 204)
