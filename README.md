@@ -37,19 +37,18 @@ python AtlRemoveUsersGroup.py --site example.atlassian.net --group "Group Name" 
 
 - `-s`, `--site` : Atlassian site hostname, for example `example.atlassian.net` (env: `ATLASSIAN_SITE`)
 - `-g`, `--group` : Group name to clean
+- `-o`, `--org` : Organization ID for Atlassian Admin API (env: `ATLASSIAN_ORG`)
 - `--dry-run` : Preview removals without executing them (default is live execution)
-- `--execute` : Actually remove non-active users from the group
 - `--out` : CSV file to write results (default: `atl_group_cleanup.csv`)
 
 ## Output
 
 The script writes a CSV file with these columns:
 
-- `accountId`
-- `displayName`
 - `email`
+- `name`
+- `account_id`
 - `account_status`
 - `action`
-- `error`
 
-Non-active users are marked as `will-remove` in dry-run mode and `removed` when `--execute` is used.
+Non-active users are marked as `would-remove` in dry-run mode and `removed` in live mode. Failed removals are recorded as `failed`.
