@@ -123,7 +123,12 @@ def fetch_group_members(session: requests.Session, site: str, group: str, auth: 
 	url = f"{build_base_url(site)}/rest/api/3/group/member"
 	start_at = 0
 	max_results = 50
-	params = {"groupname": group, "startAt": start_at, "maxResults": max_results}
+	params = {
+		"groupname": group,
+		"startAt": start_at,
+		"maxResults": max_results,
+		"includeInactiveUsers": True,
+	}
 	while True:
 		resp = request_with_retries(session, "GET", url, params=params, auth=auth)
 		resp.raise_for_status()
