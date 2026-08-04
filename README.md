@@ -22,7 +22,7 @@ The script requires the following environment variables:
 ## Usage
 
 ```powershell
-python AtlRemoveUsersGroup.py --site <your-site>.atlassian.net --group "Group Name"
+python AtlRemoveUsersGroup.py --site example.atlassian.net --group "Group Name"
 ```
 
 Live execution is the default. Use `--dry-run` to preview removals without changing the group.
@@ -30,7 +30,7 @@ Live execution is the default. Use `--dry-run` to preview removals without chang
 To preview planned removals without executing them, add `--dry-run`:
 
 ```powershell
-python AtlRemoveUsersGroup.py --site <your-site>.atlassian.net --group "Group Name" --dry-run
+python AtlRemoveUsersGroup.py --site example.atlassian.net --group "Group Name" --dry-run
 ```
 
 ## Options

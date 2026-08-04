@@ -48,13 +48,19 @@ def error(message: str) -> None:
 
 
 def normalize_site(site: str) -> str:
-	clean_site = site.strip()
+	clean_site = (site or "").strip()
+	if not clean_site:
+		raise ValueError("Atlassian site is required; provide --site or set ATLASSIAN_SITE")
 	if clean_site.startswith("http://") or clean_site.startswith("https://"):
 		parsed = urlparse(clean_site)
-		clean_site = parsed.netloc
+		clean_site = parsed.netloc or parsed.path
 	clean_site = clean_site.rstrip("/")
+	if not clean_site:
+		raise ValueError("Atlassian site is required; provide --site or set ATLASSIAN_SITE")
+	if clean_site.startswith("www."):
+		clean_site = clean_site[4:]
 	if "." not in clean_site:
-		clean_site = f"{clean_site}.atlassian.net"
+		raise ValueError("Atlassian site must be a fully qualified hostname, for example example.atlassian.net")
 	return clean_site
 
 
@@ -198,7 +204,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 		"-s",
 		"--site",
 		default=os.getenv("ATLASSIAN_SITE"),
-		help="Atlassian site, e.g. yoursite.atlassian.net (default: ATLASSIAN_SITE env var)",
+		help="Atlassian site hostname, e.g. example.atlassian.net (default: ATLASSIAN_SITE env var)",
 	)
 	p.add_argument("-g", "--group", required=True, help="Group name to clean")
 	p.add_argument("-o", "--org", default=os.getenv("ATLASSIAN_ORG"), help="Organization ID (default: ATLASSIAN_ORG env var)")
@@ -242,6 +248,11 @@ def main(argv: List[str] | None = None) -> int:
 	if not args.site:
 		parser.error("--site is required when ATLASSIAN_SITE env var is not set")
 
+	try:
+		site = normalize_site(args.site)
+	except ValueError as exc:
+		parser.error(str(exc))
+
 	dry_run = args.dry_run
 
 	jira_auth = get_jira_auth()
@@ -255,7 +266,6 @@ def main(argv: List[str] | None = None) -> int:
 		error("Missing ATLASSIAN_TOKEN or --org/ATLASSIAN_ORG")
 		return 2
 
-	site = normalize_site(args.site)
 	request_session = create_request_session()
 
 	warn(f"Fetching members of group '{args.group}' on site {site}")
