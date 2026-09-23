@@ -87,6 +87,10 @@
 ### Communication
 30. Keep progress updates concise and low-token by default; expand only when blocked or when a decision requires user input.
 
+## AtlRemoveUsersGroup CLI
+
+The cleanup script accepts exactly one target mode: `--group GROUP` for a single group or `--all-groups` for every organization group. The organization-wide mode requires `ATLASSIAN_ORG` and `ATLASSIAN_TOKEN`, uses directory account statuses, and supports repeatable or comma-separated `--exclude-group` values for critical groups. Use `--dry-run` to preview removals. CSV output includes the group name for each result.
+
 ## Anti-Patterns to Avoid
 
 These patterns waste tokens and violate credit-efficiency rules:

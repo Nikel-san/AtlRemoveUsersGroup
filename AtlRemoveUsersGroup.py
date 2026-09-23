@@ -3,9 +3,9 @@
 """
 AtlRemoveUsersGroup.py
 
-Implements Atlassian Cloud group cleanup per ICC-1: list group members,
-lookup org account statuses, and remove non-active users from a specified
-group. Use `--dry-run` to preview deletions without performing them.
+Implements Atlassian Cloud group cleanup: list group members and remove
+non-active users from one group or every organization group. Use `--dry-run`
+to preview deletions without performing them.
 
 Environment variables:
 - JIRA_EMAIL: Service account email for Jira REST API (Basic auth)
@@ -199,6 +199,39 @@ def fetch_org_user_status_map(session: requests.Session, org_id: str, token: str
 	return status_map
 
 
+def fetch_org_groups(session: requests.Session, org_id: str, token: str) -> List[str]:
+	headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+	url = f"https://api.atlassian.com/admin/v1/orgs/{org_id}/groups"
+	params = {"page": 1, "limit": 100}
+	group_names: List[str] = []
+	while True:
+		resp = request_with_retries(session, "GET", url, headers=headers, params=params)
+		resp.raise_for_status()
+		data = resp.json()
+		items = _extract_list(data, "values", "groups", "items", "results")
+		for group in items:
+			if isinstance(group, str):
+				name = group
+			else:
+				name = group.get("name") or group.get("display_name") or group.get("group_name")
+			if name:
+				group_names.append(str(name))
+
+		next_url = get_next_link(resp, data)
+		if next_url:
+			url = next_url
+			params = None
+			continue
+		if params is None or not items or len(items) < params["limit"]:
+			break
+		params["page"] += 1
+	return list(dict.fromkeys(group_names))
+
+
+def is_status_active(status: str) -> bool:
+	return status.strip().lower() == "active"
+
+
 def remove_user_from_group(session: requests.Session, site: str, group: str, account_id: str, auth: tuple) -> bool:
 	url = f"{build_base_url(site)}/rest/api/3/group/user"
 	params = {"groupname": group, "accountId": account_id}
@@ -207,7 +240,7 @@ def remove_user_from_group(session: requests.Session, site: str, group: str, acc
 
 
 def write_results_csv(path: Path, rows: Iterable[Dict[str, str]]) -> None:
-	fieldnames = ["email", "name", "account_id", "account_status", "action"]
+	fieldnames = ["group", "email", "name", "account_id", "account_status", "action"]
 	with path.open("w", newline="", encoding="utf-8") as fh:
 		writer = csv.DictWriter(fh, fieldnames=fieldnames)
 		writer.writeheader()
@@ -217,14 +250,23 @@ def write_results_csv(path: Path, rows: Iterable[Dict[str, str]]) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
 	p = argparse.ArgumentParser(description="Remove non-active users from Atlassian Cloud group")
+	target = p.add_mutually_exclusive_group(required=True)
+	target.add_argument("-g", "--group", help="Group name to clean")
+	target.add_argument("--all-groups", action="store_true", help="Clean every group in the organization")
 	p.add_argument(
 		"-s",
 		"--site",
 		default=os.getenv("ATLASSIAN_SITE"),
 		help="Atlassian site hostname, e.g. example.atlassian.net (default: ATLASSIAN_SITE env var)",
 	)
-	p.add_argument("-g", "--group", required=True, help="Group name to clean")
 	p.add_argument("-o", "--org", default=os.getenv("ATLASSIAN_ORG"), help="Organization ID (default: ATLASSIAN_ORG env var)")
+	p.add_argument(
+		"--exclude-group",
+		action="append",
+		default=[],
+		metavar="GROUP",
+		help="Group to skip; may be repeated or comma-separated (only with --all-groups)",
+	)
 	p.add_argument("--dry-run", action="store_true", help="Preview removals without executing them")
 	p.add_argument("--out", default="atl_group_cleanup.csv", help="CSV file to write results")
 	return p
@@ -264,6 +306,8 @@ def main(argv: List[str] | None = None) -> int:
 
 	if not args.site:
 		parser.error("--site is required when ATLASSIAN_SITE env var is not set")
+	if args.exclude_group and not args.all_groups:
+		parser.error("--exclude-group can only be used with --all-groups")
 
 	try:
 		site = normalize_site(args.site)
@@ -278,52 +322,86 @@ def main(argv: List[str] | None = None) -> int:
 		return 2
 
 	request_session = create_request_session()
-
-	warn(f"Fetching members of group '{args.group}' on site {site}")
-	try:
-		members = fetch_group_members(request_session, site, args.group, jira_auth)
-	except Exception as exc:
-		error(f"Failed to fetch group members: {exc}")
-		return 3
+	status_map: Dict[str, str] = {}
+	if args.all_groups:
+		admin_token = get_admin_token()
+		if not args.org or not admin_token:
+			error("--all-groups requires ATLASSIAN_ORG and ATLASSIAN_TOKEN environment variables")
+			return 2
+		try:
+			status_map = fetch_org_user_status_map(request_session, args.org, admin_token)
+			target_groups = fetch_org_groups(request_session, args.org, admin_token)
+		except Exception as exc:
+			error(f"Failed to fetch organization directory: {exc}")
+			return 3
+		excluded_groups = {
+			name.strip().casefold()
+			for value in args.exclude_group
+			for name in value.split(",")
+			if name.strip()
+		}
+		target_groups = [group for group in target_groups if group.casefold() not in excluded_groups]
+		warn(f"Found {len(target_groups)} organization groups after exclusions")
+	else:
+		target_groups = [args.group]
 
 	results: List[Dict[str, str]] = []
 	active_kept = 0
 	non_active = 0
 	failed = 0
-	for m in members:
-		account_id = m.get("accountId") or m.get("account_id")
-		display = m.get("displayName") or m.get("name") or ""
-		email = m.get("emailAddress") or m.get("email") or ""
-		is_active = is_member_active(m)
-		row = {
-			"email": email,
-			"name": display,
-			"account_id": account_id or "",
-			"account_status": "active" if is_active else "inactive",
-			"action": "",
-		}
-		if is_active:
-			active_kept += 1
-			row["action"] = "kept"
-		else:
-			non_active += 1
-			if dry_run:
-				warn(f"[DRY-RUN] Would remove {display or account_id} from {args.group}")
-				row["action"] = "would-remove"
+	member_total = 0
+	for group in target_groups:
+		warn(f"Fetching members of group '{group}' on site {site}")
+		try:
+			members = fetch_group_members(request_session, site, group, jira_auth)
+		except Exception as exc:
+			error(f"Failed to fetch members of group '{group}': {exc}")
+			continue
+		member_total += len(members)
+		for m in members:
+			account_id = m.get("accountId") or m.get("account_id")
+			display = m.get("displayName") or m.get("name") or ""
+			email = m.get("emailAddress") or m.get("email") or ""
+			if args.all_groups:
+				account_status = status_map.get(str(account_id), "unknown") if account_id else "unknown"
+				is_active = is_status_active(account_status)
 			else:
-				try:
-					if remove_user_from_group(request_session, site, args.group, account_id, jira_auth):
-						row["action"] = "removed"
-						success(f"Removed {display or account_id} from {args.group}")
-					else:
-						row["action"] = "failed"
-						failed += 1
-						error(f"Failed to remove {display or account_id} from {args.group}")
-				except Exception as exc:
+				account_status = ""
+				is_active = is_member_active(m)
+			row = {
+				"group": group,
+				"email": email,
+				"name": display,
+				"account_id": account_id or "",
+				"account_status": account_status or ("active" if is_active else "inactive"),
+				"action": "",
+			}
+			if is_active:
+				active_kept += 1
+				row["action"] = "kept"
+			else:
+				non_active += 1
+				if dry_run:
+					warn(f"[DRY-RUN] Would remove {display or account_id} from {group}")
+					row["action"] = "would-remove"
+				elif not account_id:
 					row["action"] = "failed"
 					failed += 1
-					error(f"Failed to remove {display or account_id} from {args.group}: {exc}")
-		results.append(row)
+					error(f"Cannot remove {display or 'unknown user'} from {group}: missing account ID")
+				else:
+					try:
+						if remove_user_from_group(request_session, site, group, account_id, jira_auth):
+							row["action"] = "removed"
+							success(f"Removed {display or account_id} from {group}")
+						else:
+							row["action"] = "failed"
+							failed += 1
+							error(f"Failed to remove {display or account_id} from {group}")
+					except Exception as exc:
+						row["action"] = "failed"
+						failed += 1
+						error(f"Failed to remove {display or account_id} from {group}: {exc}")
+			results.append(row)
 
 	out_path = Path(args.out)
 	if not out_path.is_absolute():
@@ -332,7 +410,8 @@ def main(argv: List[str] | None = None) -> int:
 	write_results_csv(out_path, results)
 	success(f"Results written to {out_path}")
 	print("Summary:")
-	print(f"  Group members total: {len(members)}")
+	print(f"  Groups processed: {len(target_groups)}")
+	print(f"  Group members total: {member_total}")
 	print(f"  Active (kept): {active_kept}")
 	print(f"  Non-active ({'would remove' if dry_run else 'removed'}): {non_active - failed}")
 	print(f"  Failed: {failed}")

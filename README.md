@@ -1,8 +1,8 @@
 # AtlRemoveUsersGroup
 
-Remove non-active users from an Atlassian Cloud group.
+Remove non-active users from one or every Atlassian Cloud group.
 
-This script fetches group members from a Jira site, retrieves Atlassian organization user statuses, and removes users from the specified group when their account status is not `active`.
+This script fetches group members from a Jira site and removes users whose account status is not `active`. With `--all-groups`, it reads organization directory statuses and applies the cleanup to every organization group.
 
 ## Requirements
 
@@ -23,6 +23,7 @@ The script requires the following environment variables:
 
 ```powershell
 python AtlRemoveUsersGroup.py --site example.atlassian.net --group "Group Name"
+python AtlRemoveUsersGroup.py --site example.atlassian.net --all-groups --exclude-group "site-admins" --dry-run
 ```
 
 Live execution is the default. Use `--dry-run` to preview removals without changing the group.
@@ -36,8 +37,10 @@ python AtlRemoveUsersGroup.py --site example.atlassian.net --group "Group Name" 
 ## Options
 
 - `-s`, `--site` : Atlassian site hostname, for example `example.atlassian.net` (env: `ATLASSIAN_SITE`)
-- `-g`, `--group` : Group name to clean
+- `-g`, `--group` : One group name to clean; mutually exclusive with `--all-groups`
+- `--all-groups` : Enumerate and clean every group in the organization; requires `ATLASSIAN_ORG` and `ATLASSIAN_TOKEN`
 - `-o`, `--org` : Organization ID for Atlassian Admin API (env: `ATLASSIAN_ORG`)
+- `--exclude-group` : Group to skip when using `--all-groups`; repeat the option or provide comma-separated names
 - `--dry-run` : Preview removals without executing them (default is live execution)
 - `--out` : CSV file to write results (default: `atl_group_cleanup.csv`)
 
@@ -45,6 +48,7 @@ python AtlRemoveUsersGroup.py --site example.atlassian.net --group "Group Name" 
 
 The script writes a CSV file with these columns:
 
+- `group`
 - `email`
 - `name`
 - `account_id`
