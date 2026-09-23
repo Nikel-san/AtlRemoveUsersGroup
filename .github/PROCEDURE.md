@@ -89,7 +89,7 @@
 
 ## AtlRemoveUsersGroup CLI
 
-The cleanup script accepts exactly one target mode: `--group GROUP` for a single group or `--all-groups` for every organization group. The organization-wide mode requires `ATLASSIAN_ORG` and `ATLASSIAN_TOKEN`, uses directory account statuses, and supports repeatable or comma-separated `--exclude-group` values for critical groups. Use `--dry-run` to preview removals. CSV output includes the group name for each result.
+The cleanup script accepts exactly one target mode: `--group GROUP` for a single group or `--all-groups` for every site group. The organization-wide mode enumerates groups through Jira REST `/rest/api/3/group/bulk` with `JIRA_EMAIL` and `JIRA_PAT`, reads account statuses through the Admin API `/admin/v1/orgs/{org_id}/users` with `ATLASSIAN_TOKEN` and `ATLASSIAN_ORG`, and supports repeatable or comma-separated `--exclude-group` values for critical groups. Use `--dry-run` to preview removals. CSV output includes the group name for each result.
 
 ## Anti-Patterns to Avoid
 

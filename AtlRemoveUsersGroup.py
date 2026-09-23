@@ -138,7 +138,7 @@ def fetch_group_members(session: requests.Session, site: str, group: str, auth: 
 		"includeInactiveUsers": True,
 	}
 	while True:
-		resp = request_with_retries(session, "GET", url, params=params, auth=auth)
+		resp = request_with_retries(session, "GET", url, params=params.copy() if params else None, auth=auth)
 		resp.raise_for_status()
 		data = resp.json()
 		page_members = _extract_list(data, "values", "members", "users", "results")
@@ -168,14 +168,15 @@ def fetch_group_members(session: requests.Session, site: str, group: str, auth: 
 def fetch_org_user_status_map(session: requests.Session, org_id: str, token: str) -> Dict[str, str]:
 	headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 	url = f"https://api.atlassian.com/admin/v1/orgs/{org_id}/users"
-	params = {"page": 1, "limit": 100}
+	params = {"limit": 100}
 	status_map: Dict[str, str] = {}
 	while True:
-		resp = request_with_retries(session, "GET", url, headers=headers, params=params)
+		resp = request_with_retries(session, "GET", url, headers=headers, params=params.copy() if params else None)
 		resp.raise_for_status()
 		data = resp.json()
-		# data may contain 'values' or 'users' or be a list
-		items = _extract_list(data, "values", "users", "items", "results")
+		items = data.get("data", []) if isinstance(data, dict) else []
+		if not isinstance(items, list):
+			items = []
 
 		for u in items:
 			# account_id vs accountId
@@ -189,23 +190,18 @@ def fetch_org_user_status_map(session: requests.Session, org_id: str, token: str
 			url = next_url
 			params = None
 			continue
-		if params is None:
-			break
-		# pagination: check if response indicates next page
-		# increase page param until no items returned
-		if not items or len(items) < params["limit"]:
-			break
-		params["page"] += 1
+		break
 	return status_map
 
 
-def fetch_org_groups(session: requests.Session, org_id: str, token: str) -> List[str]:
-	headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-	url = f"https://api.atlassian.com/admin/v1/orgs/{org_id}/groups"
-	params = {"page": 1, "limit": 100}
+def fetch_site_groups(session: requests.Session, site: str, auth: tuple) -> List[str]:
+	url = f"{build_base_url(site)}/rest/api/3/group/bulk"
+	start_at = 0
+	max_results = 50
+	params = {"startAt": start_at, "maxResults": max_results}
 	group_names: List[str] = []
 	while True:
-		resp = request_with_retries(session, "GET", url, headers=headers, params=params)
+		resp = request_with_retries(session, "GET", url, params=params.copy() if params else None, auth=auth)
 		resp.raise_for_status()
 		data = resp.json()
 		items = _extract_list(data, "values", "groups", "items", "results")
@@ -217,14 +213,17 @@ def fetch_org_groups(session: requests.Session, org_id: str, token: str) -> List
 			if name:
 				group_names.append(str(name))
 
-		next_url = get_next_link(resp, data)
-		if next_url:
-			url = next_url
-			params = None
-			continue
-		if params is None or not items or len(items) < params["limit"]:
+		total = data.get("total")
+		if total is not None:
+			start_at += max_results
+			if start_at >= total:
+				break
+			params["startAt"] = start_at
+		elif len(items) < max_results:
 			break
-		params["page"] += 1
+		else:
+			start_at += max_results
+			params["startAt"] = start_at
 	return list(dict.fromkeys(group_names))
 
 
@@ -273,10 +272,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def get_next_link(resp: requests.Response, data: Any) -> Optional[str]:
-	next_url = resp.links.get("next", {}).get("url") if resp.links else None
+	response_next = resp.links.get("next") if resp.links else None
+	if isinstance(response_next, dict):
+		next_url = response_next.get("url")
+	elif isinstance(response_next, str):
+		next_url = response_next
+	else:
+		next_url = None
 	if next_url:
 		return next_url
 	links = data.get("links") or data.get("_links") or {}
+	if not isinstance(links, dict):
+		return None
 	next_link = links.get("next")
 	if isinstance(next_link, dict):
 		return next_link.get("href")
@@ -330,7 +337,7 @@ def main(argv: List[str] | None = None) -> int:
 			return 2
 		try:
 			status_map = fetch_org_user_status_map(request_session, args.org, admin_token)
-			target_groups = fetch_org_groups(request_session, args.org, admin_token)
+			target_groups = fetch_site_groups(request_session, site, jira_auth)
 		except Exception as exc:
 			error(f"Failed to fetch organization directory: {exc}")
 			return 3
