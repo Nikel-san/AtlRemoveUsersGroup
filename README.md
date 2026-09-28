@@ -1,8 +1,8 @@
 # AtlRemoveUsersGroup
 
-Remove non-active users from one or every Atlassian Cloud group.
+Remove inactive, deactivated, or suspended users from one or every Atlassian Cloud group.
 
-This script fetches group members from a Jira site and removes users whose account status is not `active`. With `--all-groups`, it reads organization directory statuses and applies the cleanup to every organization group.
+This script fetches group members from a Jira site and removes users whose account status is explicitly `inactive`, `deactivated`, or `suspended`. With `--all-groups`, it reads organization directory statuses and applies the cleanup to every organization group. Active, invited, invitation-pending, and unknown-status users remain in their groups.
 
 ## Requirements
 
@@ -55,4 +55,4 @@ The script writes a CSV file with these columns:
 - `account_status`
 - `action`
 
-Non-active users are marked as `would-remove` in dry-run mode and `removed` in live mode. Failed removals are recorded as `failed`.
+Inactive, deactivated, and suspended users are marked as `would-remove` in dry-run mode and `removed` in live mode. Active, invited, invitation-pending, and unknown-status users are marked as `kept`. Failed removals are recorded as `failed`.

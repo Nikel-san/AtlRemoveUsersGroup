@@ -126,6 +126,10 @@ def is_member_active(member: dict) -> bool:
 	return bool(active_value)
 
 
+def is_status_removable(status: str) -> bool:
+	return status.strip().lower() in {"inactive", "deactivated", "suspended"}
+
+
 def fetch_group_members(session: requests.Session, site: str, group: str, auth: tuple) -> List[dict]:
 	members: List[dict] = []
 	url = f"{build_base_url(site)}/rest/api/3/group/member"
@@ -228,7 +232,7 @@ def fetch_site_groups(session: requests.Session, site: str, auth: tuple) -> List
 
 
 def is_status_active(status: str) -> bool:
-	return status.strip().lower() == "active"
+	return not is_status_removable(status)
 
 
 def remove_user_from_group(session: requests.Session, site: str, group: str, account_id: str, auth: tuple) -> bool:
@@ -373,8 +377,8 @@ def main(argv: List[str] | None = None) -> int:
 				account_status = status_map.get(str(account_id), "unknown") if account_id else "unknown"
 				is_active = is_status_active(account_status)
 			else:
-				account_status = ""
-				is_active = is_member_active(m)
+				account_status = "active" if is_member_active(m) else "inactive"
+				is_active = not is_status_removable(account_status)
 			row = {
 				"group": group,
 				"email": email,
