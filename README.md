@@ -22,22 +22,17 @@ The script requires the following environment variables:
 ## Usage
 
 ```powershell
-python AtlRemoveUsersGroup.py --site example.atlassian.net --group "Group Name"
-python AtlRemoveUsersGroup.py --site example.atlassian.net --all-groups --exclude-group "site-admins" --dry-run
-python AtlRemoveUsersGroup.py --site example.atlassian.net --group "Group Name" --exclude-domain idera.com --exclude-domain embarcadero.com --dry-run
+python AtlRemoveUsersGroup.py --site your-site.atlassian.net --group "your-group"
+python AtlRemoveUsersGroup.py --site your-site.atlassian.net --all-groups --exclude-group "critical-group" --dry-run
+python AtlRemoveUsersGroup.py --site your-site.atlassian.net --group "your-group" --exclude-domain example.com,example.org --dry-run
 ```
 
-Live execution is the default. Use `--dry-run` to preview removals without changing the group.
-
-To preview planned removals without executing them, add `--dry-run`:
-
-```powershell
-python AtlRemoveUsersGroup.py --site example.atlassian.net --group "Group Name" --dry-run
-```
+Live execution is the default. Add `--dry-run` to preview removals without changing group membership.
 
 ## Options
 
 - `-s`, `--site` : Atlassian site hostname, for example `example.atlassian.net` (env: `ATLASSIAN_SITE`)
+- `-s`, `--site` : Atlassian site hostname, for example `your-site.atlassian.net` (env: `ATLASSIAN_SITE`)
 - `-g`, `--group` : One group name to clean; mutually exclusive with `--all-groups`
 - `--all-groups` : Enumerate site groups through Jira REST `/rest/api/3/group/bulk` and clean them using Admin API directory statuses; requires all four environment variables
 - `-o`, `--org` : Organization ID for Atlassian Admin API (env: `ATLASSIAN_ORG`)
