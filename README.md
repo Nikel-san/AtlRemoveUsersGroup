@@ -24,6 +24,7 @@ The script requires the following environment variables:
 ```powershell
 python AtlRemoveUsersGroup.py --site example.atlassian.net --group "Group Name"
 python AtlRemoveUsersGroup.py --site example.atlassian.net --all-groups --exclude-group "site-admins" --dry-run
+python AtlRemoveUsersGroup.py --site example.atlassian.net --group "Group Name" --exclude-domain idera.com --exclude-domain embarcadero.com --dry-run
 ```
 
 Live execution is the default. Use `--dry-run` to preview removals without changing the group.
@@ -41,6 +42,7 @@ python AtlRemoveUsersGroup.py --site example.atlassian.net --group "Group Name" 
 - `--all-groups` : Enumerate site groups through Jira REST `/rest/api/3/group/bulk` and clean them using Admin API directory statuses; requires all four environment variables
 - `-o`, `--org` : Organization ID for Atlassian Admin API (env: `ATLASSIAN_ORG`)
 - `--exclude-group` : Group to skip when using `--all-groups`; repeat the option or provide comma-separated names
+- `--exclude-domain` : Never remove accounts whose email domain matches; repeat the option or provide comma-separated domains. A leading `@` is optional, and matching is case-insensitive and exact.
 - `--dry-run` : Preview removals without executing them (default is live execution)
 - `--out` : CSV file to write results (default: `atl_group_cleanup.csv`)
 
@@ -54,5 +56,6 @@ The script writes a CSV file with these columns:
 - `account_id`
 - `account_status`
 - `action`
+- `reason`
 
-Inactive, deactivated, and suspended users are marked as `would-remove` in dry-run mode and `removed` in live mode. Active, invited, invitation-pending, and unknown-status users are marked as `kept`. Failed removals are recorded as `failed`.
+Inactive, deactivated, and suspended users are marked as `would-remove` in dry-run mode and `removed` in live mode. Active, invited, invitation-pending, and unknown-status users are marked as `kept`. Failed removals are recorded as `failed`. With `--exclude-domain`, matching removable users are recorded as `skipped` with reason `Excluded domain`. If a removable user's email cannot be resolved, the script fails safe and records `skipped` with reason `Email unknown — domain exclusion cannot be verified`.

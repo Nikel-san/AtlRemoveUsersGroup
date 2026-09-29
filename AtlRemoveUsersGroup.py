@@ -20,7 +20,7 @@ import csv
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 from urllib.parse import urlparse
 
 import requests
@@ -169,7 +169,12 @@ def fetch_group_members(session: requests.Session, site: str, group: str, auth: 
 	return members
 
 
-def fetch_org_user_status_map(session: requests.Session, org_id: str, token: str) -> Dict[str, str]:
+def fetch_org_user_status_map(
+	session: requests.Session,
+	org_id: str,
+	token: str,
+	email_map: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
 	headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 	url = f"https://api.atlassian.com/admin/v1/orgs/{org_id}/users"
 	params = {"limit": 100}
@@ -188,6 +193,10 @@ def fetch_org_user_status_map(session: requests.Session, org_id: str, token: str
 			status = u.get("account_status") or u.get("accountStatus") or u.get("status")
 			if acct:
 				status_map[str(acct)] = status or "unknown"
+				if email_map is not None:
+					email = u.get("email") or u.get("email_address") or u.get("emailAddress")
+					if email:
+						email_map[str(acct)] = str(email)
 
 		next_url = get_next_link(resp, data)
 		if next_url:
@@ -235,6 +244,22 @@ def is_status_active(status: str) -> bool:
 	return not is_status_removable(status)
 
 
+def normalize_domains(values: Iterable[str]) -> Set[str]:
+	return {
+		domain.strip().lstrip("@").strip().casefold()
+		for value in values
+		for domain in value.split(",")
+		if domain.strip().lstrip("@").strip()
+	}
+
+
+def email_domain(email: str) -> str:
+	local_part, separator, domain = email.strip().rpartition("@")
+	if not separator or not local_part or not domain.strip():
+		return ""
+	return domain.strip().casefold()
+
+
 def remove_user_from_group(session: requests.Session, site: str, group: str, account_id: str, auth: tuple) -> bool:
 	url = f"{build_base_url(site)}/rest/api/3/group/user"
 	params = {"groupname": group, "accountId": account_id}
@@ -242,8 +267,18 @@ def remove_user_from_group(session: requests.Session, site: str, group: str, acc
 	return resp.status_code in (200, 204)
 
 
+def fetch_user_email(session: requests.Session, site: str, account_id: str, auth: tuple) -> str:
+	url = f"{build_base_url(site)}/rest/api/3/user"
+	resp = request_with_retries(session, "GET", url, params={"accountId": account_id}, auth=auth)
+	resp.raise_for_status()
+	data = resp.json()
+	if not isinstance(data, dict):
+		return ""
+	return str(data.get("emailAddress") or data.get("email") or "")
+
+
 def write_results_csv(path: Path, rows: Iterable[Dict[str, str]]) -> None:
-	fieldnames = ["group", "email", "name", "account_id", "account_status", "action"]
+	fieldnames = ["group", "email", "name", "account_id", "account_status", "action", "reason"]
 	with path.open("w", newline="", encoding="utf-8") as fh:
 		writer = csv.DictWriter(fh, fieldnames=fieldnames)
 		writer.writeheader()
@@ -269,6 +304,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 		default=[],
 		metavar="GROUP",
 		help="Group to skip; may be repeated or comma-separated (only with --all-groups)",
+	)
+	p.add_argument(
+		"--exclude-domain",
+		action="append",
+		default=[],
+		metavar="DOMAIN",
+		help="Never remove accounts from this email domain; may be repeated or comma-separated",
 	)
 	p.add_argument("--dry-run", action="store_true", help="Preview removals without executing them")
 	p.add_argument("--out", default="atl_group_cleanup.csv", help="CSV file to write results")
@@ -319,6 +361,9 @@ def main(argv: List[str] | None = None) -> int:
 		parser.error("--site is required when ATLASSIAN_SITE env var is not set")
 	if args.exclude_group and not args.all_groups:
 		parser.error("--exclude-group can only be used with --all-groups")
+	excluded_domains = normalize_domains(args.exclude_domain)
+	if args.exclude_domain and not excluded_domains:
+		parser.error("--exclude-domain requires at least one domain")
 
 	try:
 		site = normalize_site(args.site)
@@ -334,13 +379,19 @@ def main(argv: List[str] | None = None) -> int:
 
 	request_session = create_request_session()
 	status_map: Dict[str, str] = {}
+	email_map: Dict[str, str] = {}
 	if args.all_groups:
 		admin_token = get_admin_token()
 		if not args.org or not admin_token:
 			error("--all-groups requires ATLASSIAN_ORG and ATLASSIAN_TOKEN environment variables")
 			return 2
 		try:
-			status_map = fetch_org_user_status_map(request_session, args.org, admin_token)
+			status_map = fetch_org_user_status_map(
+				request_session,
+				args.org,
+				admin_token,
+				email_map if excluded_domains else None,
+			)
 			target_groups = fetch_site_groups(request_session, site, jira_auth)
 		except Exception as exc:
 			error(f"Failed to fetch organization directory: {exc}")
@@ -355,6 +406,12 @@ def main(argv: List[str] | None = None) -> int:
 		warn(f"Found {len(target_groups)} organization groups after exclusions")
 	else:
 		target_groups = [args.group]
+		admin_token = get_admin_token()
+		if excluded_domains and args.org and admin_token:
+			try:
+				fetch_org_user_status_map(request_session, args.org, admin_token, email_map)
+			except Exception as exc:
+				warn(f"Failed to fetch organization email directory; unresolved emails will be skipped: {exc}")
 
 	results: List[Dict[str, str]] = []
 	active_kept = 0
@@ -379,6 +436,14 @@ def main(argv: List[str] | None = None) -> int:
 			else:
 				account_status = "active" if is_member_active(m) else "inactive"
 				is_active = not is_status_removable(account_status)
+			if excluded_domains and not is_active and not email and account_id:
+				if email_map:
+					email = email_map.get(str(account_id), "")
+				elif not args.all_groups and not (args.org and get_admin_token()):
+					try:
+						email = fetch_user_email(request_session, site, str(account_id), jira_auth)
+					except Exception as exc:
+						warn(f"Could not resolve email for {display or account_id}: {exc}")
 			row = {
 				"group": group,
 				"email": email,
@@ -386,11 +451,25 @@ def main(argv: List[str] | None = None) -> int:
 				"account_id": account_id or "",
 				"account_status": account_status or ("active" if is_active else "inactive"),
 				"action": "",
+				"reason": "",
 			}
 			if is_active:
 				active_kept += 1
 				row["action"] = "kept"
 			else:
+				domain = email_domain(email) if email else ""
+				if excluded_domains and domain in excluded_domains:
+					row["action"] = "skipped"
+					row["reason"] = "Excluded domain"
+					warn(f"Skipped (excluded domain): {display or account_id} {email} in {group}")
+					results.append(row)
+					continue
+				if excluded_domains and not domain:
+					row["action"] = "skipped"
+					row["reason"] = "Email unknown — domain exclusion cannot be verified"
+					warn(f"Skipped (email unknown): {display or account_id} in {group}")
+					results.append(row)
+					continue
 				non_active += 1
 				if dry_run:
 					warn(f"[DRY-RUN] Would remove {display or account_id} from {group}")
@@ -425,6 +504,8 @@ def main(argv: List[str] | None = None) -> int:
 	print(f"  Group members total: {member_total}")
 	print(f"  Active (kept): {active_kept}")
 	print(f"  Non-active ({'would remove' if dry_run else 'removed'}): {non_active - failed}")
+	print(f"  Skipped (excluded domain): {sum(row['reason'] == 'Excluded domain' for row in results)}")
+	print(f"  Skipped (email unknown): {sum(row['reason'] == 'Email unknown — domain exclusion cannot be verified' for row in results)}")
 	print(f"  Failed: {failed}")
 	return 0
 
