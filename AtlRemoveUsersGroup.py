@@ -127,7 +127,7 @@ def is_member_active(member: dict) -> bool:
 
 
 def is_status_removable(status: str) -> bool:
-	return status.strip().lower() in {"inactive", "deactivated", "suspended"}
+	return status.strip().lower() in {"inactive", "inactive (jira)", "deactivated", "suspended"}
 
 
 def fetch_group_members(session: requests.Session, site: str, group: str, auth: tuple) -> List[dict]:
@@ -312,6 +312,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 		metavar="DOMAIN",
 		help="Never remove accounts from this email domain; may be repeated or comma-separated",
 	)
+	p.add_argument(
+		"--allow-unverified-external",
+		action="store_true",
+		help="Allow removal of unresolved external accounts; only use with verified managed-account domains",
+	)
 	p.add_argument("--dry-run", action="store_true", help="Preview removals without executing them")
 	p.add_argument("--out", default="atl_group_cleanup.csv", help="CSV file to write results")
 	return p
@@ -364,6 +369,8 @@ def main(argv: List[str] | None = None) -> int:
 	excluded_domains = normalize_domains(args.exclude_domain)
 	if args.exclude_domain and not excluded_domains:
 		parser.error("--exclude-domain requires at least one domain")
+	if args.allow_unverified_external and not excluded_domains:
+		parser.error("--allow-unverified-external requires --exclude-domain")
 
 	try:
 		site = normalize_site(args.site)
@@ -376,12 +383,15 @@ def main(argv: List[str] | None = None) -> int:
 	if not jira_auth:
 		error("Missing JIRA_EMAIL or JIRA_PAT environment variables")
 		return 2
+	admin_token = get_admin_token()
+	if args.allow_unverified_external and (not args.org or not admin_token):
+		error("--allow-unverified-external requires ATLASSIAN_ORG and ATLASSIAN_TOKEN environment variables")
+		return 2
 
 	request_session = create_request_session()
 	status_map: Dict[str, str] = {}
 	email_map: Dict[str, str] = {}
 	if args.all_groups:
-		admin_token = get_admin_token()
 		if not args.org or not admin_token:
 			error("--all-groups requires ATLASSIAN_ORG and ATLASSIAN_TOKEN environment variables")
 			return 2
@@ -406,16 +416,25 @@ def main(argv: List[str] | None = None) -> int:
 		warn(f"Found {len(target_groups)} organization groups after exclusions")
 	else:
 		target_groups = [args.group]
-		admin_token = get_admin_token()
-		if excluded_domains and args.org and admin_token:
+		if args.allow_unverified_external or (excluded_domains and args.org and admin_token):
 			try:
-				fetch_org_user_status_map(request_session, args.org, admin_token, email_map)
+				status_map = fetch_org_user_status_map(
+					request_session,
+					args.org,
+					admin_token,
+					email_map if excluded_domains else None,
+				)
 			except Exception as exc:
+				if args.allow_unverified_external:
+					error(f"Failed to fetch organization directory required by --allow-unverified-external: {exc}")
+					return 3
 				warn(f"Failed to fetch organization email directory; unresolved emails will be skipped: {exc}")
 
 	results: List[Dict[str, str]] = []
 	active_kept = 0
 	non_active = 0
+	removed_via_jira_status = 0
+	removed_as_unverified_external = 0
 	failed = 0
 	member_total = 0
 	for group in target_groups:
@@ -428,20 +447,32 @@ def main(argv: List[str] | None = None) -> int:
 		member_total += len(members)
 		for m in members:
 			account_id = m.get("accountId") or m.get("account_id")
+			account_key = str(account_id) if account_id else ""
 			display = m.get("displayName") or m.get("name") or ""
 			email = m.get("emailAddress") or m.get("email") or ""
-			if args.all_groups:
-				account_status = status_map.get(str(account_id), "unknown") if account_id else "unknown"
-				is_active = is_status_active(account_status)
+			in_org_directory = account_key in status_map
+			account_type = str(m.get("accountType") or "").strip().casefold()
+			if account_type and account_type != "atlassian":
+				account_status = "unknown"
+				is_active = True
+			elif args.all_groups:
+				if in_org_directory:
+					account_status = status_map[account_key]
+					is_active = is_status_active(account_status)
+				elif account_type == "atlassian":
+					account_status = "active (jira)" if is_member_active(m) else "inactive (jira)"
+					is_active = is_status_active(account_status)
+				else:
+					account_status = "unknown"
+					is_active = True
 			else:
 				account_status = "active" if is_member_active(m) else "inactive"
 				is_active = not is_status_removable(account_status)
 			if excluded_domains and not is_active and not email and account_id:
-				if email_map:
-					email = email_map.get(str(account_id), "")
-				elif not args.all_groups and not (args.org and get_admin_token()):
+				email = email_map.get(account_key, "")
+				if not email:
 					try:
-						email = fetch_user_email(request_session, site, str(account_id), jira_auth)
+						email = fetch_user_email(request_session, site, account_key, jira_auth)
 					except Exception as exc:
 						warn(f"Could not resolve email for {display or account_id}: {exc}")
 			row = {
@@ -457,6 +488,7 @@ def main(argv: List[str] | None = None) -> int:
 				active_kept += 1
 				row["action"] = "kept"
 			else:
+				unverified_external = False
 				domain = email_domain(email) if email else ""
 				if excluded_domains and domain in excluded_domains:
 					row["action"] = "skipped"
@@ -465,15 +497,23 @@ def main(argv: List[str] | None = None) -> int:
 					results.append(row)
 					continue
 				if excluded_domains and not domain:
-					row["action"] = "skipped"
-					row["reason"] = "Email unknown — domain exclusion cannot be verified"
-					warn(f"Skipped (email unknown): {display or account_id} in {group}")
-					results.append(row)
-					continue
+					if args.allow_unverified_external and not in_org_directory:
+						unverified_external = True
+						row["reason"] = "External, not in org directory"
+					else:
+						row["action"] = "skipped"
+						row["reason"] = "Email unknown — domain exclusion cannot be verified"
+						warn(f"Skipped (email unknown): {display or account_id} in {group}")
+						results.append(row)
+						continue
 				non_active += 1
 				if dry_run:
 					warn(f"[DRY-RUN] Would remove {display or account_id} from {group}")
 					row["action"] = "would-remove"
+					if account_status == "inactive (jira)" and not in_org_directory:
+						removed_via_jira_status += 1
+					if unverified_external:
+						removed_as_unverified_external += 1
 				elif not account_id:
 					row["action"] = "failed"
 					failed += 1
@@ -483,6 +523,10 @@ def main(argv: List[str] | None = None) -> int:
 						if remove_user_from_group(request_session, site, group, account_id, jira_auth):
 							row["action"] = "removed"
 							success(f"Removed {display or account_id} from {group}")
+							if account_status == "inactive (jira)" and not in_org_directory:
+								removed_via_jira_status += 1
+							if unverified_external:
+								removed_as_unverified_external += 1
 						else:
 							row["action"] = "failed"
 							failed += 1
@@ -504,6 +548,8 @@ def main(argv: List[str] | None = None) -> int:
 	print(f"  Group members total: {member_total}")
 	print(f"  Active (kept): {active_kept}")
 	print(f"  Non-active ({'would remove' if dry_run else 'removed'}): {non_active - failed}")
+	print(f"  {'Would remove' if dry_run else 'Removed'} via Jira status (not in org directory): {removed_via_jira_status}")
+	print(f"  {'Would remove' if dry_run else 'Removed'} as unverified external: {removed_as_unverified_external}")
 	print(f"  Skipped (excluded domain): {sum(row['reason'] == 'Excluded domain' for row in results)}")
 	print(f"  Skipped (email unknown): {sum(row['reason'] == 'Email unknown — domain exclusion cannot be verified' for row in results)}")
 	print(f"  Failed: {failed}")
